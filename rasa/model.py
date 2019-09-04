@@ -4,6 +4,7 @@ import os
 import shutil
 import tempfile
 import typing
+from collections import namedtuple
 from typing import Text, Tuple, Union, Optional, List, Dict
 
 import rasa.utils.io
@@ -15,6 +16,7 @@ from rasa.constants import (
     CONFIG_MANDATORY_KEYS,
 )
 
+from rasa.core.domain import Domain
 from rasa.core.utils import get_dict_hash
 from rasa.exceptions import ModelNotFound
 from rasa.utils.common import TempDirectoryPath
@@ -22,21 +24,48 @@ from rasa.utils.common import TempDirectoryPath
 if typing.TYPE_CHECKING:
     from rasa.importers.importer import TrainingDataImporter
 
-# Type alias for the fingerprint
-Fingerprint = Dict[Text, Union[Text, List[Text], int, float]]
 
 logger = logging.getLogger(__name__)
+
+
+# Type alias for the fingerprint
+Fingerprint = Dict[Text, Union[Text, List[Text], int, float]]
 
 FINGERPRINT_FILE_PATH = "fingerprint.json"
 
 FINGERPRINT_CONFIG_KEY = "config"
 FINGERPRINT_CONFIG_CORE_KEY = "core-config"
 FINGERPRINT_CONFIG_NLU_KEY = "nlu-config"
-FINGERPRINT_DOMAIN_KEY = "domain"
+FINGERPRINT_DOMAIN_WITHOUT_TEMPLATES_KEY = "domain"
+FINGERPRINT_TEMPLATES_KEY = "templates"
 FINGERPRINT_RASA_VERSION_KEY = "version"
 FINGERPRINT_STORIES_KEY = "stories"
 FINGERPRINT_NLU_DATA_KEY = "messages"
 FINGERPRINT_TRAINED_AT_KEY = "trained_at"
+
+
+Section = namedtuple("Section", ["name", "relevant_keys"])
+
+SECTION_CORE = Section(
+    name="Core model",
+    relevant_keys=[
+        FINGERPRINT_CONFIG_KEY,
+        FINGERPRINT_CONFIG_CORE_KEY,
+        FINGERPRINT_DOMAIN_WITHOUT_TEMPLATES_KEY,
+        FINGERPRINT_STORIES_KEY,
+        FINGERPRINT_RASA_VERSION_KEY,
+    ],
+)
+SECTION_NLU = Section(
+    name="NLU model",
+    relevant_keys=[
+        FINGERPRINT_CONFIG_KEY,
+        FINGERPRINT_CONFIG_NLU_KEY,
+        FINGERPRINT_NLU_DATA_KEY,
+        FINGERPRINT_RASA_VERSION_KEY,
+    ],
+)
+SECTION_TEMPLATES = Section(name="Templates", relevant_keys=[FINGERPRINT_TEMPLATES_KEY])
 
 
 def get_model(model_path: Text = DEFAULT_MODELS_PATH) -> TempDirectoryPath:
@@ -208,6 +237,10 @@ async def model_fingerprint(file_importer: "TrainingDataImporter") -> Fingerprin
     stories = await file_importer.get_stories()
     nlu_data = await file_importer.get_nlu_data()
 
+    domain_dict = domain.as_dict()
+    templates = domain_dict.pop("templates")
+    domain_without_templates = Domain.from_dict(domain_dict)
+
     return {
         FINGERPRINT_CONFIG_KEY: _get_hash_of_config(
             config, exclude_keys=CONFIG_MANDATORY_KEYS
@@ -218,7 +251,8 @@ async def model_fingerprint(file_importer: "TrainingDataImporter") -> Fingerprin
         FINGERPRINT_CONFIG_NLU_KEY: _get_hash_of_config(
             config, include_keys=CONFIG_MANDATORY_KEYS_NLU
         ),
-        FINGERPRINT_DOMAIN_KEY: hash(domain),
+        FINGERPRINT_DOMAIN_WITHOUT_TEMPLATES_KEY: hash(domain_without_templates),
+        FINGERPRINT_TEMPLATES_KEY: get_dict_hash(templates),
         FINGERPRINT_NLU_DATA_KEY: hash(nlu_data),
         FINGERPRINT_STORIES_KEY: hash(stories),
         FINGERPRINT_TRAINED_AT_KEY: time.time(),
@@ -275,58 +309,13 @@ def persist_fingerprint(output_path: Text, fingerprint: Fingerprint):
     dump_obj_as_json_to_file(path, fingerprint)
 
 
-def core_fingerprint_changed(
-    fingerprint1: Fingerprint, fingerprint2: Fingerprint
+def section_fingerprint_changed(
+    fingerprint1: Fingerprint, fingerprint2: Fingerprint, section: Section
 ) -> bool:
-    """Checks whether the fingerprints of the Core model changed.
-
-    Args:
-        fingerprint1: A fingerprint.
-        fingerprint2: Another fingerprint.
-
-    Returns:
-        `True` if the fingerprint for the Core model changed, else `False`.
-
-    """
-    relevant_keys = [
-        FINGERPRINT_CONFIG_KEY,
-        FINGERPRINT_CONFIG_CORE_KEY,
-        FINGERPRINT_DOMAIN_KEY,
-        FINGERPRINT_STORIES_KEY,
-        FINGERPRINT_RASA_VERSION_KEY,
-    ]
-
-    for k in relevant_keys:
+    """Check whether the fingerprint of a section has changed."""
+    for k in section.relevant_keys:
         if fingerprint1.get(k) != fingerprint2.get(k):
-            logger.info("Data ({}) for Core model changed.".format(k))
-            return True
-    return False
-
-
-def nlu_fingerprint_changed(
-    fingerprint1: Fingerprint, fingerprint2: Fingerprint
-) -> bool:
-    """Checks whether the fingerprints of the NLU model changed.
-
-    Args:
-        fingerprint1: A fingerprint.
-        fingerprint2: Another fingerprint.
-
-    Returns:
-        `True` if the fingerprint for the NLU model changed, else `False`.
-
-    """
-
-    relevant_keys = [
-        FINGERPRINT_CONFIG_KEY,
-        FINGERPRINT_CONFIG_NLU_KEY,
-        FINGERPRINT_NLU_DATA_KEY,
-        FINGERPRINT_RASA_VERSION_KEY,
-    ]
-
-    for k in relevant_keys:
-        if fingerprint1.get(k) != fingerprint2.get(k):
-            logger.info("Data ({}) for NLU model changed.".format(k))
+            logger.info("Data ({}) for {} section changed.".format(k, section.name))
             return True
     return False
 
@@ -363,25 +352,35 @@ def should_retrain(new_fingerprint: Fingerprint, old_model: Text, train_path: Te
         to be retrained or not.
 
     """
-    retrain_nlu = retrain_core = True
+    retrain_nlu = retrain_core = replace_templates = True
 
     if old_model is None or not os.path.exists(old_model):
-        return retrain_core, retrain_nlu
+        return retrain_core, retrain_nlu, replace_templates
 
     with unpack_model(old_model) as unpacked:
         last_fingerprint = fingerprint_from_path(unpacked)
 
         old_core, old_nlu = get_model_subdirectories(unpacked)
 
-        if not core_fingerprint_changed(last_fingerprint, new_fingerprint):
+        if not section_fingerprint_changed(
+            last_fingerprint, new_fingerprint, SECTION_TEMPLATES
+        ):
+            target_path = os.path.join(train_path, "core")
+            replace_templates = not merge_model(old_core, target_path)
+
+        if not section_fingerprint_changed(
+            last_fingerprint, new_fingerprint, SECTION_CORE
+        ):
             target_path = os.path.join(train_path, "core")
             retrain_core = not merge_model(old_core, target_path)
 
-        if not nlu_fingerprint_changed(last_fingerprint, new_fingerprint):
+        if not section_fingerprint_changed(
+            last_fingerprint, new_fingerprint, SECTION_NLU
+        ):
             target_path = os.path.join(train_path, "nlu")
             retrain_nlu = not merge_model(old_nlu, target_path)
 
-        return retrain_core, retrain_nlu
+        return retrain_core, retrain_nlu, replace_templates
 
 
 def package_model(
