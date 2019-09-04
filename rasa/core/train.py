@@ -61,9 +61,7 @@ async def train(
         },
     )
     training_data = await agent.load_data(
-        training_resource,
-        exclusion_percentage=exclusion_percentage,
-        **data_load_args
+        training_resource, exclusion_percentage=exclusion_percentage, **data_load_args
     )
     agent.train(training_data, **kwargs)
     agent.persist(output_path, dump_stories, replace_templates_only)
