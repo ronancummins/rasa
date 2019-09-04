@@ -306,10 +306,10 @@ async def test_rasa_packaging(trained_model, project, use_fingerprint):
         },
     ],
 )
-def test_should_retrain(trained_model, fingerprint):
+def test_should_retrain(trained_model: Text, fingerprint: Fingerprint):
     old_model = set_fingerprint(trained_model, fingerprint["old"])
 
-    retrain_core, retrain_nlu = should_retrain(
+    retrain_core, retrain_nlu, replace_templates = should_retrain(
         fingerprint["new"], old_model, tempfile.mkdtemp()
     )
 
@@ -324,9 +324,7 @@ def set_fingerprint(
     unpacked_model_path = get_model(trained_model)
 
     os.remove(os.path.join(unpacked_model_path, FINGERPRINT_FILE_PATH))
-    if use_fingerprint:
-        fingerprint = fingerprint
-    else:
+    if not use_fingerprint:
         fingerprint = None
 
     tempdir = tempfile.mkdtemp()

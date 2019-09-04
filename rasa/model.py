@@ -335,7 +335,7 @@ def merge_model(source: Text, target: Text) -> bool:
         shutil.move(source, target)
         return True
     except Exception as e:
-        logging.debug(e)
+        logging.debug("Could not merge model: {}".format(e))
         return False
 
 
@@ -362,17 +362,21 @@ def should_retrain(new_fingerprint: Fingerprint, old_model: Text, train_path: Te
 
         old_core, old_nlu = get_model_subdirectories(unpacked)
 
-        if not section_fingerprint_changed(
-            last_fingerprint, new_fingerprint, SECTION_TEMPLATES
-        ):
-            target_path = os.path.join(train_path, "core")
-            replace_templates = not merge_model(old_core, target_path)
-
+        core_merged = False
         if not section_fingerprint_changed(
             last_fingerprint, new_fingerprint, SECTION_CORE
         ):
             target_path = os.path.join(train_path, "core")
-            retrain_core = not merge_model(old_core, target_path)
+            core_merged = merge_model(old_core, target_path)
+            retrain_core = not core_merged
+        if not section_fingerprint_changed(
+            last_fingerprint, new_fingerprint, SECTION_TEMPLATES
+        ):
+            if core_merged:
+                replace_templates = False
+            else:
+                target_path = os.path.join(train_path, "core")
+                replace_templates = not merge_model(old_core, target_path)
 
         if not section_fingerprint_changed(
             last_fingerprint, new_fingerprint, SECTION_NLU
